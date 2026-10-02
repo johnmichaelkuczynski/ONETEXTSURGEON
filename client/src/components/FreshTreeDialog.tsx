@@ -6,27 +6,37 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { FreshTreeChapterProgress } from "../../../shared/freshTreeProgress";
+import { nextFreshTreeDepth, type FreshTreeChapterProgress } from "../../../shared/freshTreeProgress";
 
-type Mode = "A" | "B" | "C" | "D";
+type Mode = "A" | "B" | "C" | "D" | "E";
 type Chapter = { index: number; number: number; title: string; wordCount: number };
 type Statement = { number: string; text: string; depth: number };
+type ExactBase = { index: number; statements: Statement[] };
 type Source = { node: string; url: string; marker?: string };
 type Tree = { index: number; title: string; statements: Statement[]; sources: Source[]; complete: boolean; progress?: FreshTreeChapterProgress };
 type RunSnapshot = { inputKey: string; action: "generate" | "next"; target: number; instructions: string; addedInstructions: string; expectedUnits: number };
-type SavedRun = { version: 1; snapshot: RunSnapshot; trees: Tree[]; warnings: string[]; mode: Mode; chosen: number[]; depthInput: string };
-const CHECKPOINT_KEY = "fresh-tree-checkpoint-v1";
-const DEFAULT_INSTRUCTIONS = "Under each node, add 1 or 2 child nodes. Each must be a concrete example or fact that illustrates or supports its parent. It must be FRESH: do not use any example, name, case, or illustration from the source text. Prefer real, accurate, current scientific or factual examples; everyday examples are allowed; do not invent fake facts. One sentence per node. No commentary.";
-const DEPTH_ERROR = "Depth must be a whole number of 2 or more.";
+type SavedRun = { version: 2; snapshot: RunSnapshot; trees: Tree[]; warnings: string[]; mode: Mode; chosen: number[]; depthInput: string };
+const CHECKPOINT_KEY = "fresh-tree-checkpoint-v2";
+const DEFAULT_INSTRUCTIONS = "Under each node, add 1 or 2 child nodes that ESTABLISH that exact parent. Prefer a logical child when the parent is a distinction, definition, or inference: restate the author's own contrast or example in one sentence, or give a full mini-derivation. Prefer an empirical child only when the parent is an empirical claim. Fresh means: do not paraphrase the parent and do not repeat a child already in the tree. Source examples are ALLOWED when they are the author's proof of that parent. One sentence per node. No commentary.";
+const DEPTH_ERROR = "Depth must be a whole number of 4 or more.";
 
 function parseFreshTreeDepth(value: string): number | null {
-  if (!value.trim()) return 2;
+  if (!value.trim()) return 4;
   if (!/^\d+$/.test(value.trim())) return null;
   const depth = Number(value.trim());
-  return Number.isSafeInteger(depth) && depth >= 2 ? depth : null;
+  return Number.isSafeInteger(depth) && depth >= 4 ? depth : null;
 }
 
-export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToProsify }: { open: boolean; onOpenChange: (open: boolean) => void; text: string; selection: string; onSendToProsify: (tree: string) => void }) {
+export function FreshTreeDialog({ open, onOpenChange, text, selection, provider, exactBaseMode, exactBases, onSendToProsify }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  text: string;
+  selection: string;
+  provider: string;
+  exactBaseMode: "whole" | "chapters" | null;
+  exactBases: ExactBase[];
+  onSendToProsify: (tree: string) => void;
+}) {
   const [mode, setMode] = useState<Mode>("A");
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [chosen, setChosen] = useState<number[]>([]);
@@ -59,8 +69,8 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
       const raw = sessionStorage.getItem(CHECKPOINT_KEY);
       if (raw) {
         const saved: SavedRun = JSON.parse(raw);
-        if (saved.version !== 1 || !saved.snapshot || !Array.isArray(saved.trees) || !Array.isArray(saved.warnings) ||
-          !["A", "B", "C", "D"].includes(saved.mode) || !Array.isArray(saved.chosen)) {
+        if (saved.version !== 2 || !saved.snapshot || !Array.isArray(saved.trees) || !Array.isArray(saved.warnings) ||
+          !["A", "B", "C", "D", "E"].includes(saved.mode) || !Array.isArray(saved.chosen)) {
           throw new Error("The saved Fresh Tree checkpoint could not be read.");
         }
         setSnapshot(saved.snapshot); setGeneratedFor(saved.snapshot.inputKey);
@@ -76,7 +86,7 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
   useEffect(() => {
     if (!restored || !snapshot) return;
     try {
-      const saved: SavedRun = { version: 1, snapshot, trees, warnings, mode: JSON.parse(snapshot.inputKey).mode,
+      const saved: SavedRun = { version: 2, snapshot, trees, warnings, mode: JSON.parse(snapshot.inputKey).mode,
         chosen: JSON.parse(snapshot.inputKey).chosen, depthInput: String(snapshot.target) };
       sessionStorage.setItem(CHECKPOINT_KEY, JSON.stringify(saved));
       setStorageError("");
@@ -118,8 +128,21 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
   }, [open, mode, text]);
 
   const close = () => { request.current?.abort(); request.current = null; runId.current = null; setRunning(false); onOpenChange(false); };
-  const inputKey = JSON.stringify({ text, selection: mode === "D" ? selection : "", mode, chosen: mode === "C" ? [...chosen].sort((a, b) => a - b) : [] });
-  const expectedUnits = mode === "B" ? chapters.length : mode === "C" ? chosen.length : 1;
+  const applicableBases = mode === "A" && exactBaseMode === "whole"
+    ? exactBases.filter((base) => base.index === 0)
+    : mode === "E" && exactBaseMode === "whole" && exactBases[0]
+      ? [0, 1, 2].map((index) => ({ index, statements: exactBases[0].statements }))
+    : (mode === "B" || mode === "C") && exactBaseMode === "chapters"
+      ? exactBases.filter((base) => mode === "B" || chosen.includes(base.index))
+      : [];
+  const exactBaseSignature = applicableBases.map((base) => {
+    const first = base.statements[0];
+    const last = base.statements.at(-1);
+    return `${base.index}:${base.statements.length}:${first?.number || ""}:${first?.text || ""}:${last?.number || ""}:${last?.text || ""}`;
+  });
+  const inputKey = JSON.stringify({ text, selection: mode === "D" ? selection : "", mode, provider, exactBaseSignature,
+    chosen: mode === "C" ? [...chosen].sort((a, b) => a - b) : [] });
+  const expectedUnits = mode === "E" ? 3 : mode === "B" ? chapters.length : mode === "C" ? chosen.length : 1;
   const sameSource = snapshot?.inputKey === inputKey;
   const unfinished = !!snapshot && (trees.length < snapshot.expectedUnits || trees.some((tree) => !tree.complete));
   const sameSettings = !!snapshot && snapshot.instructions === instructions && snapshot.addedInstructions === addedInstructions &&
@@ -131,10 +154,10 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
     const units = base.length || Math.max(expectedUnits, 1);
     const roots = base.length ? base.reduce((sum, tree) => sum + tree.statements.filter((item) => item.depth === 0).length, 0) : units;
     const leaves = base.length ? base.reduce((sum, tree) => sum + tree.statements.filter((item) => item.depth === 1).length, 0) : units * 2;
-    const initialNodes = base.length ? base.reduce((sum, tree) => sum + tree.statements.filter((item) => item.depth <= 1).length, 0) : units * 3;
-    const thirdTier = target > 2 ? Math.ceil(leaves * 1.5) : 0;
-    const nodes = initialNodes + thirdTier * Math.max(0, target - 2);
-    const calls = units + roots * Math.max(0, target - 2) * 3;
+    const initialNodes = base.length ? base.reduce((sum, tree) => sum + tree.statements.length, 0) : units * 12;
+    const nextTier = target > 4 ? Math.ceil(leaves * 1.5) : 0;
+    const nodes = initialNodes + nextTier * Math.max(0, target - 4);
+    const calls = units + roots * Math.max(0, target - 4) * 3;
     return { nodes, calls };
   };
   const stop = async () => {
@@ -158,7 +181,8 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
     if (mode === "C" && !chosen.length) { setErrors(["Tick at least one detected chapter."]); return; }
     if (action === "resume" && (!canResume || !snapshot)) { setErrors(["Restore the original source, chapter selection, depth, and instructions to resume this run."]); return; }
     if (action === "next" && (generatedFor !== inputKey || unfinished)) { setErrors(["Finish the current run on its original source before adding another tier."]); return; }
-    const target = action === "resume" ? snapshot!.target : action === "generate" ? parseFreshTreeDepth(depthInput) : 2;
+    const nextDepth = nextFreshTreeDepth(trees);
+    const target = action === "resume" ? snapshot!.target : action === "generate" ? parseFreshTreeDepth(depthInput) : nextDepth;
     if (target === null) { setErrors([DEPTH_ERROR]); return; }
     if (action === "generate" && target > 6 && !confirmed) { setConfirmDepth(target); setErrors([]); return; }
     setConfirmDepth(null);
@@ -178,7 +202,8 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
     try {
       const response = await fetch("/api/fresh-tree", { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", cache: "no-store", signal: controller.signal,
         body: JSON.stringify({ text, selection, mode, indices: chosen, action,
-          instructions: action === "resume" ? snapshot!.instructions : instructions, depth: target,
+          instructions: action === "resume" ? snapshot!.instructions : instructions, depth: target, provider,
+          exactBases: action === "generate" ? applicableBases : undefined,
           addedInstructions: action === "resume" ? snapshot!.addedInstructions : addedInstructions, runId: id,
           resumeAction: action === "resume" ? snapshot!.action : undefined,
           trees: action !== "generate" ? trees : undefined }) });
@@ -243,7 +268,8 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
   });
   const output = trees.map((tree) => {
     const chapter = chapters.find((item) => item.index === tree.index);
-    const heading = mode === "B" || mode === "C" ? `CHAPTER ${chapter?.number ?? tree.index + 1}: ${tree.title.replace(/^chapter\s+(?:\d+|[ivxlcdm]+|[a-z]+)\s*[:.—–-]?\s*/i, "") || "Untitled"}\n` : "";
+    const heading = mode === "E" ? `TREE ${tree.index + 1}\n`
+      : mode === "B" || mode === "C" ? `CHAPTER ${chapter?.number ?? tree.index + 1}: ${tree.title.replace(/^chapter\s+(?:\d+|[ivxlcdm]+|[a-z]+)\s*[:.—–-]?\s*/i, "") || "Untitled"}\n` : "";
     const body = ordered(tree.statements).map((item) => `${item.number} ${item.text}`).join("\n");
     const sources = tree.sources.length ? `\n\nSources\n${tree.sources.map((item) => `${item.marker ? `${item.marker} ` : ""}(${item.node}) — ${item.url}`).join("\n")}` : "";
     return heading + body + sources;
@@ -263,7 +289,7 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
     <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto [&>button]:hidden" data-testid="fresh-tree-dialog">
       <DialogHeader><DialogTitle>FRESH TREE</DialogTitle></DialogHeader>
       <RadioGroup value={mode} onValueChange={(value) => { if (!running) { setMode(value as Mode); setErrors([]); } }}>
-        {[["A", "Whole book — one tree"], ["B", "Whole book — each chapter gets its own tree"], ["C", "Selected chapters — each gets its own tree"], ["D", "Manual select"]].map(([value, label]) =>
+        {[["A", "Whole book — one tree"], ["E", "Whole book — three independent trees"], ["B", "Whole book — each chapter gets its own tree"], ["C", "Selected chapters — each gets its own tree"], ["D", "Manual select"]].map(([value, label]) =>
           <label key={value} className="flex items-center gap-2 text-sm cursor-pointer"><RadioGroupItem value={value} disabled={running} data-testid={`fresh-tree-mode-${value}`} />{label}</label>)}
       </RadioGroup>
       {(mode === "B" || mode === "C") && <div className="max-h-44 overflow-y-auto rounded border p-3" data-testid="fresh-tree-chapters">
@@ -274,17 +300,17 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
       <div className="space-y-2">
         <Label htmlFor="fresh-tree-depth">Depth (optional)</Label>
         <Input id="fresh-tree-depth" type="text" inputMode="numeric" value={depthInput}
-          onChange={(event) => { setDepthInput(event.target.value); setConfirmDepth(null); }}
-          placeholder="Blank = 2 tiers" disabled={running} data-testid="fresh-tree-depth" />
+          onChange={(event) => { setDepthInput(event.target.value); setConfirmDepth(null); setErrors([]); }}
+          placeholder="Blank = Tractatus Tree base (4+ tiers)" disabled={running} data-testid="fresh-tree-depth" />
         <p className="text-xs text-muted-foreground" data-testid="fresh-tree-estimate">
           {generatedFor === inputKey && trees.some((tree) => tree.statements.some((item) => item.depth === 1))
-            ? `Estimated size: ~${estimate(parseFreshTreeDepth(depthInput) || 2).nodes} nodes, ~${estimate(parseFreshTreeDepth(depthInput) || 2).calls} model calls.`
+            ? `Estimated size: ~${estimate(parseFreshTreeDepth(depthInput) || 4).nodes} nodes, ~${estimate(parseFreshTreeDepth(depthInput) || 4).calls} model calls.`
             : "Estimated size shown after tiers 1–2 are built."}
         </p>
         <div className="flex flex-wrap gap-1" aria-label="Choose depth">
-          {[2, 3, 4, 5, 6].map((choice) =>
+          {[4, 5, 6, 7, 8].map((choice) =>
             <Button key={choice} size="sm" type="button" variant={depthInput === String(choice) ? "default" : "outline"}
-              disabled={running} onClick={() => { setDepthInput(String(choice)); setConfirmDepth(null); }} data-testid={`fresh-tree-depth-${choice}`}>
+              disabled={running} onClick={() => { setDepthInput(String(choice)); setConfirmDepth(null); setErrors([]); }} data-testid={`fresh-tree-depth-${choice}`}>
               {choice} tiers
             </Button>)}
         </div>
@@ -303,7 +329,7 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
         <span className="inline-block size-2 rounded-full bg-blue-600 animate-pulse mr-2" aria-hidden="true" />
         {stopping ? "Stopping…" : "Fresh Tree is running"} · {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")} elapsed
         {progress && <span className="block mt-1">{progress}</span>}
-        <span className="block mt-1">{trees.filter((tree) => tree.complete).length} of {expectedUnits} chapters finished · {trees.reduce((sum, tree) => sum + tree.statements.length, 0)} nodes received</span>
+        <span className="block mt-1">{trees.filter((tree) => tree.complete).length} of {expectedUnits} trees finished · {trees.reduce((sum, tree) => sum + tree.statements.length, 0)} nodes received</span>
         <div className="flex gap-2 mt-2">
           {output && <Button type="button" size="sm" variant="outline" onClick={download}>Save output so far</Button>}
           <Button type="button" size="sm" variant="destructive" disabled={stopping} onClick={() => void stop()}>{stopping ? "STOPPING…" : "STOP"}</Button>
@@ -312,7 +338,7 @@ export function FreshTreeDialog({ open, onOpenChange, text, selection, onSendToP
       {!running && progress && <p className="text-sm" role="status">{progress}</p>}
       {storageError && <p className="text-amber-900 text-sm" role="alert">{storageError}</p>}
       {!running && unfinished && <p className="text-sm" role="status" data-testid="fresh-tree-resume-status">
-        {trees.filter((tree) => tree.complete).length} of {snapshot!.expectedUnits} chapters finished. Completed chapters and streamed nodes are retained.
+        {trees.filter((tree) => tree.complete).length} of {snapshot!.expectedUnits} trees finished. Completed trees and streamed nodes are retained.
         {!sameSource ? " Restore the original source and chapter selection to resume." : !sameSettings ? " Restore the original depth and instructions to resume." : " Resume continues only unfinished work."}
       </p>}
       {providerStatuses.map((status, index) => <p key={`${index}-${status}`} className="text-amber-900 text-sm" role="status">{status}</p>)}

@@ -66,7 +66,8 @@ export function buildTractatusTree(statements: TractatusStatement[]): TractatusT
 export async function generateTractatusTree(
   text: string,
   provider: string = "openai",
-  onProgress?: (progress: { current: number; total: number; message: string }) => void
+  onProgress?: (progress: { current: number; total: number; message: string }) => void,
+  signal?: AbortSignal,
 ): Promise<TractatusTreeResult> {
   const wordCount = text.split(/\s+/).length;
   const estimatedSections = Math.ceil(wordCount / 2000);
@@ -112,7 +113,7 @@ Generate the hierarchical Tractatus structure now:`;
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const response = await callLLM(provider, attempt === 0 ? prompt :
-      `${prompt}\n\nYour previous response did not form at least four levels starting at 1.0. Retry with levels 1.0, 1.1, 1.1.1, and 1.1.1.1 present and one independent numbering sequence starting at 1.0.`);
+      `${prompt}\n\nYour previous response did not form at least four levels starting at 1.0. Retry with levels 1.0, 1.1, 1.1.1, and 1.1.1.1 present and one independent numbering sequence starting at 1.0.`, signal);
     onProgress?.({ current: 1, total: estimatedSections + 1, message: "Checking the four-level hierarchy..." });
 
     const statements = parseTractatusOutput(response);

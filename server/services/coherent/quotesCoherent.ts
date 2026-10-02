@@ -2,6 +2,11 @@ import { callLLM } from "../../llm";
 import { generateSkeleton, DocumentSkeletonData } from "./skeletonGenerator";
 import { chunkText } from "./coherenceProcessor";
 import { ProgressUpdate } from "./stateSchemas";
+import {
+  isCompleteVerbatimQuote,
+  quoteLimitForDepth,
+  STRIKING_QUOTE_CRITERIA,
+} from "../quoteQuality";
 
 export interface ExtractedQuote {
   quote: string;
@@ -30,6 +35,7 @@ export async function quotesCoherent(
   const chunks = chunkText(text, 1500);
   const allQuotes: ExtractedQuote[] = [];
   const depth = options.depth || 5;
+  const quoteLimit = quoteLimitForDepth(depth);
 
   for (let i = 0; i < chunks.length; i++) {
     onProgress?.({
@@ -52,10 +58,10 @@ CHUNK ${i + 1} OF ${chunks.length}:
 ${chunks[i]}
 
 TASK:
-Extract ${depth * 2} quotes that are:
-1. REPRESENTATIVE of the document's overall argument
-2. Memorable and quotable
-3. Central to understanding the thesis: "${skeleton.mainThesis}"
+${STRIKING_QUOTE_CRITERIA}
+
+Select at most ${quoteLimit} quotes from this chunk. This is a ceiling, not a target. Return an empty array if nothing qualifies.
+Selections should also be representative of the document's argument and central to understanding the thesis: "${skeleton.mainThesis}"
 
 Return JSON array:
 [
@@ -71,7 +77,10 @@ Return JSON array:
       const jsonMatch = response.match(/\[[\s\S]*\]/);
       if (jsonMatch) {
         const chunkQuotes = JSON.parse(jsonMatch[0]);
-        allQuotes.push(...chunkQuotes.map((q: any) => ({ ...q, sourceChunk: i })));
+        allQuotes.push(...chunkQuotes
+          .filter((q: any) => isCompleteVerbatimQuote(chunks[i], q?.quote))
+          .slice(0, quoteLimit)
+          .map((q: any) => ({ ...q, sourceChunk: i })));
       }
     } catch (e) {
       console.error(`Failed to extract quotes from chunk ${i}:`, e);

@@ -468,6 +468,7 @@ export default function Home() {
   const [tractatusTreeProgress, setTractatusTreeProgress] = useState<{current: number, total: number, message: string} | null>(null);
   const [tractatusTreeColumns, setTractatusTreeColumns] = useState<{number: string, text: string, depth: number}[][]>([]);
   const [tractatusTreeMaxDepth, setTractatusTreeMaxDepth] = useState(0);
+  const [tractatusTreeProvider, setTractatusTreeProvider] = useState("");
   const [isGeneratingTree, setIsGeneratingTree] = useState(false);
   const [tractatusTreeTitle, setTractatusTreeTitle] = useState("TRACTATUS TREE");
   const [tractatusTreeMode, setTractatusTreeMode] = useState<"whole" | "chapters">("whole");
@@ -622,6 +623,7 @@ export default function Home() {
     setIsGeneratingTree(false);
     setTractatusTreeColumns([]);
     setTractatusTreeMaxDepth(0);
+    setTractatusTreeProvider("");
     setTractatusTreeProgress(null);
     setChapterTrees([]);
     setSelectedChapterIndex(0);
@@ -693,6 +695,12 @@ export default function Home() {
         }
 
         if (requestId !== gptZeroRequestIdRef.current) return;
+        if (payload?.code === "GPTZERO_NOT_CONFIGURED") {
+          setGptZeroResult(null);
+          setGptZeroError(payload.error || "GPTZero detection is not configured yet");
+          setGptZeroStatus("error");
+          return;
+        }
         setGptZeroResult(payload);
         setGptZeroStatus("complete");
       } catch (error: any) {
@@ -2163,6 +2171,7 @@ export default function Home() {
     treeRequestRef.current = controller;
     setIsGeneratingTree(true);
     setTractatusTreeColumns([]);
+    setTractatusTreeProvider(selectedLLM);
     setChapterTrees([]);
     setSelectedChapterIndex(0);
     setTractatusTreeProgress({ current: 0, total: 3, message: "Starting Tractatus Tree generation..." });
@@ -7809,7 +7818,13 @@ Freedom is the ratio essendi of the moral law."
 
       {/* Tractatus Tree Dialog */}
       <FreshTreeDialog open={showFreshTree} onOpenChange={setShowFreshTree}
-        text={text} selection={freshTreeSelection} onSendToProsify={(tree) => {
+        text={text} selection={freshTreeSelection} provider={selectedLLM}
+        exactBaseMode={tractatusTreeProvider === selectedLLM && tractatusTreeColumns.length
+          ? tractatusTreeMode : null}
+        exactBases={tractatusTreeProvider !== selectedLLM ? [] : tractatusTreeMode === "whole"
+          ? [{ index: 0, statements: tractatusTreeColumns.at(-1) || [] }]
+          : chapterTrees.map((chapter, index) => ({ index, statements: chapter.columns.at(-1) || [] }))}
+        onSendToProsify={(tree) => {
           setProsifyTree(tree);
           setShowProsify(true);
         }} />
@@ -7853,6 +7868,7 @@ Freedom is the ratio essendi of the moral law."
                   setTractatusTreeMode(value);
                   setTractatusTreeColumns([]);
                   setTractatusTreeMaxDepth(0);
+                  setTractatusTreeProvider("");
                   setChapterTrees([]);
                   setSelectedChapterIndex(0);
                   setTractatusTreeProgress(null);

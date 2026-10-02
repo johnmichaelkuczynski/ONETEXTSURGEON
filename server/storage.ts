@@ -26,7 +26,7 @@ import {
   visits,
   bookDatabases,
 } from "@shared/schema";
-import { db } from "./db";
+import { db, hasDatabase } from "./db";
 import { eq, and, desc, ilike, or, sql, gte } from "drizzle-orm";
 
 export interface IStorage {
@@ -401,4 +401,368 @@ export class DatabaseStorage implements IStorage {
   }
 }
 
-export const storage = new DatabaseStorage();
+class MemStorage implements IStorage {
+  private users: User[] = [];
+  private stylometricAuthors: StylometricAuthor[] = [];
+  private analysisHistory: AnalysisHistory[] = [];
+  private corpusAuthors: CorpusAuthor[] = [];
+  private corpusWorks: CorpusWork[] = [];
+  private workSections: WorkSection[] = [];
+  private philosophicalPositions: PhilosophicalPosition[] = [];
+  private visits: Visit[] = [];
+  private bookDatabases: BookDatabaseRow[] = [];
+  private ids = {
+    users: 1,
+    stylometricAuthors: 1,
+    analysisHistory: 1,
+    corpusAuthors: 1,
+    corpusWorks: 1,
+    workSections: 1,
+    philosophicalPositions: 1,
+    visits: 1,
+    bookDatabases: 1,
+  };
+
+  async getUser(id: number): Promise<User | undefined> {
+    return this.users.find((user) => user.id === id);
+  }
+
+  async getUserById(id: number): Promise<User | undefined> {
+    return this.getUser(id);
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    return this.users.find((user) => user.username === username);
+  }
+
+  async createUser(user: InsertUser): Promise<User> {
+    const created = {
+      id: this.ids.users++,
+      username: user.username,
+      googleId: user.googleId ?? null,
+      email: user.email ?? null,
+      displayName: user.displayName ?? null,
+      credits: user.credits ?? 0,
+      createdAt: new Date(),
+    } satisfies User;
+    this.users.push(created);
+    return created;
+  }
+
+  async addCredits(userId: number, amount: number): Promise<User> {
+    const user = await this.getUserById(userId);
+    if (!user) throw new Error("User not found");
+    user.credits += amount;
+    return user;
+  }
+
+  async deductCredits(userId: number, amount: number): Promise<User> {
+    const user = await this.getUserById(userId);
+    if (!user) throw new Error("User not found");
+    user.credits = Math.max(user.credits - amount, 0);
+    return user;
+  }
+
+  async getUserCredits(userId: number): Promise<number> {
+    return (await this.getUserById(userId))?.credits ?? 0;
+  }
+
+  async getStylometricAuthors(userId: number): Promise<StylometricAuthor[]> {
+    return this.stylometricAuthors.filter((author) => author.userId === userId);
+  }
+
+  async getStylometricAuthor(id: number): Promise<StylometricAuthor | undefined> {
+    return this.stylometricAuthors.find((author) => author.id === id);
+  }
+
+  async getStylometricAuthorByName(userId: number, authorName: string): Promise<StylometricAuthor | undefined> {
+    return this.stylometricAuthors.find(
+      (author) => author.userId === userId && author.authorName.toLowerCase() === authorName.toLowerCase(),
+    );
+  }
+
+  async createStylometricAuthor(author: InsertStylometricAuthor): Promise<StylometricAuthor> {
+    const now = new Date();
+    const created = {
+      id: this.ids.stylometricAuthors++,
+      userId: author.userId ?? null,
+      authorName: author.authorName,
+      sourceTitle: author.sourceTitle ?? null,
+      wordCount: author.wordCount ?? null,
+      verticalityScore: author.verticalityScore ?? null,
+      createdAt: now,
+      updatedAt: now,
+      rawFeatures: author.rawFeatures ?? null,
+      signaturePhrases: author.signaturePhrases ?? null,
+      negativeMarkers: author.negativeMarkers ?? null,
+      sampleSentences: author.sampleSentences ?? null,
+      closestAuthorMatch: author.closestAuthorMatch ?? null,
+      matchExplanation: author.matchExplanation ?? null,
+      psychologicalProfile: author.psychologicalProfile ?? null,
+      narrativeSummary: author.narrativeSummary ?? null,
+      clustering: author.clustering ?? null,
+      fullReport: author.fullReport ?? null,
+    } satisfies StylometricAuthor;
+    this.stylometricAuthors.push(created);
+    return created;
+  }
+
+  async updateStylometricAuthor(id: number, author: Partial<InsertStylometricAuthor>): Promise<StylometricAuthor | undefined> {
+    const existing = await this.getStylometricAuthor(id);
+    if (!existing) return undefined;
+    Object.assign(existing, author, { updatedAt: new Date() });
+    return existing;
+  }
+
+  async deleteStylometricAuthor(id: number): Promise<boolean> {
+    const before = this.stylometricAuthors.length;
+    this.stylometricAuthors = this.stylometricAuthors.filter((author) => author.id !== id);
+    return this.stylometricAuthors.length !== before;
+  }
+
+  async createAnalysisHistory(history: InsertAnalysisHistory): Promise<AnalysisHistory> {
+    const created = {
+      id: this.ids.analysisHistory++,
+      userId: history.userId ?? null,
+      analysisType: history.analysisType,
+      provider: history.provider ?? null,
+      inputPreview: history.inputPreview ?? null,
+      outputData: history.outputData ?? null,
+      createdAt: new Date(),
+    } satisfies AnalysisHistory;
+    this.analysisHistory.push(created);
+    return created;
+  }
+
+  async getAnalysisHistory(userId: number): Promise<AnalysisHistory[]> {
+    return this.analysisHistory
+      .filter((history) => history.userId === userId)
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+  }
+
+  async getAnalysisHistoryByType(userId: number, analysisType: string): Promise<AnalysisHistory[]> {
+    return (await this.getAnalysisHistory(userId)).filter((history) => history.analysisType === analysisType);
+  }
+
+  async getAnalysisHistoryItem(id: number): Promise<AnalysisHistory | undefined> {
+    return this.analysisHistory.find((history) => history.id === id);
+  }
+
+  async deleteAnalysisHistoryItem(id: number): Promise<boolean> {
+    const before = this.analysisHistory.length;
+    this.analysisHistory = this.analysisHistory.filter((history) => history.id !== id);
+    return this.analysisHistory.length !== before;
+  }
+
+  async getAllCorpusAuthors(): Promise<CorpusAuthor[]> {
+    return [...this.corpusAuthors].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async getCorpusAuthor(id: number): Promise<CorpusAuthor | undefined> {
+    return this.corpusAuthors.find((author) => author.id === id);
+  }
+
+  async findCorpusAuthorByName(name: string): Promise<CorpusAuthor | undefined> {
+    const needle = name.toLowerCase();
+    return this.corpusAuthors.find((author) =>
+      author.name.toLowerCase().includes(needle) ||
+      (author.aliases ?? "").toLowerCase().includes(needle),
+    );
+  }
+
+  async createCorpusAuthor(author: InsertCorpusAuthor): Promise<CorpusAuthor> {
+    const created = {
+      id: this.ids.corpusAuthors++,
+      name: author.name,
+      aliases: author.aliases ?? null,
+      era: author.era ?? null,
+      description: author.description ?? null,
+      createdAt: new Date(),
+    } satisfies CorpusAuthor;
+    this.corpusAuthors.push(created);
+    return created;
+  }
+
+  async deleteCorpusAuthor(id: number): Promise<boolean> {
+    const workIds = this.corpusWorks.filter((work) => work.authorId === id).map((work) => work.id);
+    this.workSections = this.workSections.filter((section) => !workIds.includes(section.workId ?? -1));
+    this.corpusWorks = this.corpusWorks.filter((work) => work.authorId !== id);
+    const before = this.corpusAuthors.length;
+    this.corpusAuthors = this.corpusAuthors.filter((author) => author.id !== id);
+    return this.corpusAuthors.length !== before;
+  }
+
+  async getCorpusWorks(authorId: number): Promise<CorpusWork[]> {
+    return this.corpusWorks
+      .filter((work) => work.authorId === authorId)
+      .sort((a, b) => a.title.localeCompare(b.title));
+  }
+
+  async getCorpusWork(id: number): Promise<CorpusWork | undefined> {
+    return this.corpusWorks.find((work) => work.id === id);
+  }
+
+  async createCorpusWork(work: InsertCorpusWork): Promise<CorpusWork> {
+    const created = {
+      id: this.ids.corpusWorks++,
+      authorId: work.authorId ?? null,
+      title: work.title,
+      year: work.year ?? null,
+      source: work.source ?? null,
+      wordCount: work.wordCount ?? null,
+      createdAt: new Date(),
+    } satisfies CorpusWork;
+    this.corpusWorks.push(created);
+    return created;
+  }
+
+  async deleteCorpusWork(id: number): Promise<boolean> {
+    this.workSections = this.workSections.filter((section) => section.workId !== id);
+    const before = this.corpusWorks.length;
+    this.corpusWorks = this.corpusWorks.filter((work) => work.id !== id);
+    return this.corpusWorks.length !== before;
+  }
+
+  async getWorkSections(workId: number): Promise<WorkSection[]> {
+    return this.workSections
+      .filter((section) => section.workId === workId)
+      .sort((a, b) => a.sectionNumber - b.sectionNumber);
+  }
+
+  async createWorkSections(sections: InsertWorkSection[]): Promise<WorkSection[]> {
+    const created = sections.map((section) => ({
+      id: this.ids.workSections++,
+      workId: section.workId ?? null,
+      sectionNumber: section.sectionNumber,
+      content: section.content,
+      createdAt: new Date(),
+    }) satisfies WorkSection);
+    this.workSections.push(...created);
+    return created;
+  }
+
+  async searchCorpusByAuthor(authorName: string, searchTerm: string): Promise<{ section: WorkSection; workTitle: string; authorName: string }[]> {
+    const author = await this.findCorpusAuthorByName(authorName);
+    if (!author) return [];
+    const needle = searchTerm.toLowerCase();
+    const works = await this.getCorpusWorks(author.id);
+    return works.flatMap((work) =>
+      this.workSections
+        .filter((section) => section.workId === work.id && section.content.toLowerCase().includes(needle))
+        .map((section) => ({ section, workTitle: work.title, authorName: author.name })),
+    );
+  }
+
+  async getAllPhilosophicalPositions(): Promise<PhilosophicalPosition[]> {
+    return [...this.philosophicalPositions].sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+  }
+
+  async getPhilosophicalPositionsByTopic(topic: string): Promise<PhilosophicalPosition[]> {
+    const needle = topic.toLowerCase();
+    return (await this.getAllPhilosophicalPositions()).filter((position) => position.topic.toLowerCase().includes(needle));
+  }
+
+  async getPhilosophicalPositionsByThinker(thinker: string): Promise<PhilosophicalPosition[]> {
+    const needle = thinker.toLowerCase();
+    return (await this.getAllPhilosophicalPositions()).filter((position) => position.thinker.toLowerCase().includes(needle));
+  }
+
+  async searchPhilosophicalPositions(searchTerm: string): Promise<PhilosophicalPosition[]> {
+    const needle = searchTerm.toLowerCase();
+    return (await this.getAllPhilosophicalPositions()).filter((position) =>
+      position.statement.toLowerCase().includes(needle) ||
+      position.topic.toLowerCase().includes(needle) ||
+      position.thinker.toLowerCase().includes(needle) ||
+      (position.keywords ?? "").toLowerCase().includes(needle),
+    );
+  }
+
+  async createPhilosophicalPosition(position: InsertPhilosophicalPosition): Promise<PhilosophicalPosition> {
+    const created = {
+      id: this.ids.philosophicalPositions++,
+      thinker: position.thinker,
+      statement: position.statement,
+      topic: position.topic,
+      source: position.source ?? null,
+      era: position.era ?? null,
+      keywords: position.keywords ?? null,
+      embedding: position.embedding ?? null,
+      createdAt: new Date(),
+    } satisfies PhilosophicalPosition;
+    this.philosophicalPositions.push(created);
+    return created;
+  }
+
+  async batchCreatePhilosophicalPositions(positions: InsertPhilosophicalPosition[]): Promise<PhilosophicalPosition[]> {
+    const created: PhilosophicalPosition[] = [];
+    for (const position of positions) created.push(await this.createPhilosophicalPosition(position));
+    return created;
+  }
+
+  async deletePhilosophicalPosition(id: number): Promise<boolean> {
+    const before = this.philosophicalPositions.length;
+    this.philosophicalPositions = this.philosophicalPositions.filter((position) => position.id !== id);
+    return this.philosophicalPositions.length !== before;
+  }
+
+  async recordVisit(userId: number | null, email: string | null): Promise<void> {
+    this.visits.push({
+      id: this.ids.visits++,
+      userId,
+      email,
+      visitedAt: new Date(),
+    });
+  }
+
+  async getLastVisit(userId: number): Promise<Visit | undefined> {
+    return this.visits
+      .filter((visit) => visit.userId === userId)
+      .sort((a, b) => b.visitedAt.getTime() - a.visitedAt.getTime())[0];
+  }
+
+  async getVisits(limit: number): Promise<Visit[]> {
+    return [...this.visits]
+      .sort((a, b) => b.visitedAt.getTime() - a.visitedAt.getTime())
+      .slice(0, limit);
+  }
+
+  async getVisitTimestampsSince(since: Date | null): Promise<Date[]> {
+    return this.visits
+      .filter((visit) => !since || visit.visitedAt >= since)
+      .map((visit) => visit.visitedAt);
+  }
+
+  async saveBookDatabase(entry: InsertBookDatabase): Promise<BookDatabaseRow> {
+    const created = {
+      id: this.ids.bookDatabases++,
+      userId: entry.userId ?? null,
+      title: entry.title ?? null,
+      author: entry.author ?? null,
+      wordCount: entry.wordCount ?? null,
+      provider: entry.provider ?? null,
+      inputPreview: entry.inputPreview ?? null,
+      data: entry.data,
+      createdAt: new Date(),
+    } satisfies BookDatabaseRow;
+    this.bookDatabases.push(created);
+    return created;
+  }
+
+  async getBookDatabases(userId: number): Promise<BookDatabaseRow[]> {
+    return this.bookDatabases
+      .filter((entry) => entry.userId === userId)
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+  }
+
+  async getBookDatabase(id: number): Promise<BookDatabaseRow | undefined> {
+    return this.bookDatabases.find((entry) => entry.id === id);
+  }
+
+  async deleteBookDatabase(id: number): Promise<boolean> {
+    const before = this.bookDatabases.length;
+    this.bookDatabases = this.bookDatabases.filter((entry) => entry.id !== id);
+    return this.bookDatabases.length !== before;
+  }
+}
+
+export const storage = hasDatabase ? new DatabaseStorage() : new MemStorage();

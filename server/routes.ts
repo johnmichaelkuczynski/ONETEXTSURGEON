@@ -22,6 +22,7 @@ import {
 } from "./services/genius101";
 import { transformWorkshop, validateWorkshopRequest } from "./services/humanizerWorkshop";
 import { splitBookChapters, splitTractatusChapters } from "./services/tractatusChapters";
+import type { FreshTreeStatement } from "./services/freshTree";
 import type { FreshTreeChapterProgress } from "../shared/freshTreeProgress";
 
 const upload = multer({ 
@@ -72,7 +73,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/gptzero/detect", async (req, res) => {
     const apiKey = process.env.GPTZERO_API_KEY;
     if (!apiKey) {
-      return res.status(503).json({
+      return res.json({
         error: "GPTZero detection is not configured yet",
         code: "GPTZERO_NOT_CONFIGURED",
       });
@@ -1300,14 +1301,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.post("/api/fresh-tree", async (req, res) => {
-    const { text, selection, mode, indices, action = "generate", resumeAction, trees, instructions, addedInstructions, depth, runId } = req.body || {};
-    if (typeof text !== "string" || !text.trim() || !["A", "B", "C", "D"].includes(mode) ||
+    const { text, selection, mode, indices, action = "generate", resumeAction, trees, instructions, addedInstructions, depth, runId, provider = "openai", exactBases } = req.body || {};
+    if (typeof text !== "string" || !text.trim() || !["A", "B", "C", "D", "E"].includes(mode) ||
       !["generate", "next", "resume"].includes(action) ||
       (action === "resume" && !["generate", "next"].includes(resumeAction))) {
       return res.status(400).json({ error: "Valid text, mode, and action are required." });
     }
-    if (depth !== undefined && (!Number.isInteger(depth) || depth < 2)) {
-      return res.status(400).json({ error: "Depth must be a whole number of 2 or more." });
+    if (depth !== undefined && (!Number.isInteger(depth) || depth < 4)) {
+      return res.status(400).json({ error: "Depth must be a whole number of 4 or more." });
     }
     if (action === "resume" && depth === undefined) {
       return res.status(400).json({ error: "Resume requires the original target depth." });
@@ -1321,9 +1322,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     if (mode === "C" && (!Array.isArray(indices) || !indices.length || indices.some((index: unknown) => !Number.isInteger(index) || (index as number) < 0 || (index as number) >= chapters.length))) {
       return res.status(400).json({ error: "Tick at least one detected chapter." });
     }
-    const selected = mode === "C" ? Array.from(new Set(indices as number[])).sort((a, b) => a - b) : mode === "B" ? chapters.map((_, index) => index) : [0];
-    const allUnits = selected.map((index) => ({ index, title: mode === "A" ? "Whole book" : mode === "D" ? "Selected text" : chapters[index].title,
-      source: mode === "A" ? text : mode === "D" ? selection as string : chapters[index].text }));
+    const selected = mode === "E" ? [0, 1, 2]
+      : mode === "C" ? Array.from(new Set(indices as number[])).sort((a, b) => a - b)
+      : mode === "B" ? chapters.map((_, index) => index) : [0];
+    const allUnits = selected.map((index) => ({
+      index,
+      title: mode === "E" ? `Tree ${index + 1}` : mode === "A" ? "Whole book" : mode === "D" ? "Selected text" : chapters[index].title,
+      source: mode === "A" || mode === "E" ? text : mode === "D" ? selection as string : chapters[index].text,
+    }));
     const treeByIndex = new Map<number, any>();
     const selectedIndexes = new Set(allUnits.map((unit) => unit.index));
     if (action !== "generate") {
@@ -1347,16 +1353,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       ? allUnits : allUnits.filter((unit) => treeByIndex.has(unit.index));
     if (action !== "generate" && !units.length) return res.status(400).json({ error: "No matching tree checkpoints are available." });
     const isValidProgress = (progress: any): progress is FreshTreeChapterProgress => {
-      if (!progress || typeof progress.baseComplete !== "boolean" || !Number.isInteger(progress.targetDepth) ||
-        progress.targetDepth < 2 || !Number.isInteger(progress.completedDepth) || progress.completedDepth < 0 ||
+      if (!progress || typeof progress.baseComplete !== "boolean" || !Number.isInteger(progress.baseDepth) ||
+        progress.baseDepth < 0 || !Number.isInteger(progress.targetDepth) ||
+        progress.targetDepth < 4 || !Number.isInteger(progress.completedDepth) || progress.completedDepth < 0 ||
         progress.completedDepth > progress.targetDepth || !progress.tiers || typeof progress.tiers !== "object" ||
         Array.isArray(progress.tiers)) return false;
-      if (progress.baseComplete ? progress.completedDepth < 2 : progress.completedDepth !== 0) return false;
-      for (let tier = 3; tier <= progress.completedDepth; tier++) {
+      if (progress.baseComplete
+        ? progress.baseDepth < 4 || progress.completedDepth < progress.baseDepth
+        : progress.baseDepth !== 0 || progress.completedDepth !== 0) return false;
+      for (let tier = progress.baseDepth + 1; tier <= progress.completedDepth; tier++) {
         if (!progress.tiers[String(tier)]?.complete) return false;
       }
       for (const [tier, state] of Object.entries(progress.tiers) as Array<[string, any]>) {
-        if (!/^\d+$/.test(tier) || String(Number(tier)) !== tier || Number(tier) < 3 ||
+        if (!/^\d+$/.test(tier) || String(Number(tier)) !== tier || Number(tier) <= progress.baseDepth ||
           Number(tier) > progress.completedDepth && state?.complete === true || !state || typeof state.complete !== "boolean" ||
           !Array.isArray(state.completedTheses) || state.completedTheses.some((item: unknown) => typeof item !== "string")) return false;
       }
@@ -1385,14 +1394,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
         typeof source.url === "string" && source.url.trim() &&
         (source.marker === undefined || typeof source.marker === "string"));
     };
+    const exactBaseByIndex = new Map<number, FreshTreeStatement[]>();
+    if (action === "generate" && exactBases !== undefined) {
+      if (!Array.isArray(exactBases)) return res.status(400).json({ error: "Exact Tractatus bases must be an array." });
+      for (const base of exactBases) {
+        if (!base || !Number.isInteger(base.index) || !selectedIndexes.has(base.index) ||
+          exactBaseByIndex.has(base.index) || !Array.isArray(base.statements) ||
+          !hasValidStatements(base.statements)) {
+          return res.status(400).json({ error: "An exact Tractatus base is invalid or does not match the selected document unit." });
+        }
+        const baseDepth = base.statements.length
+          ? Math.max(...base.statements.map((statement: FreshTreeStatement) => statement.depth)) + 1
+          : 0;
+        if (baseDepth < 4) return res.status(400).json({ error: "An exact Tractatus base must contain at least four levels." });
+        exactBaseByIndex.set(base.index, structuredClone(base.statements));
+      }
+    }
     const ensureTierStates = (progress: FreshTreeChapterProgress) => {
-      for (let tier = 3; tier <= progress.targetDepth; tier++) {
+      for (let tier = progress.baseDepth + 1; tier <= progress.targetDepth; tier++) {
         progress.tiers[String(tier)] ||= { completedTheses: [], complete: false };
       }
     };
     if (action === "next") {
       for (const tree of trees as any[]) {
-        if (!tree.statements.length || (tree.progress !== undefined && (!isValidProgress(tree.progress) || tree.progress.completedDepth < 2 ||
+        if (!tree.statements.length || (tree.progress !== undefined && (!isValidProgress(tree.progress) || tree.progress.completedDepth < 4 ||
           tree.complete === false || (typeof tree.complete === "boolean" &&
             tree.complete !== (tree.progress.completedDepth >= tree.progress.targetDepth))))) {
           return res.status(400).json({ error: `Tree ${tree.index} has an incomplete or invalid checkpoint; use resume before adding another tier.` });
@@ -1418,15 +1443,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         }
         for (const statement of tree.statements) {
-          if (statement.depth < 2) continue;
           const tier = statement.depth + 1;
+          if (tier <= tree.progress.baseDepth) continue;
           const thesis = `${statement.number.split(".")[0]}.0`;
           if (tier > tree.progress.targetDepth ||
             !tree.progress.tiers[String(tier)]?.completedTheses.includes(thesis)) {
             return res.status(400).json({ error: `Tree ${tree.index} contains streamed nodes without their completed thesis checkpoint; resume is unsafe.` });
           }
         }
-        if (resumeAction === "generate" && depth !== undefined && tree.progress.targetDepth !== depth) {
+        if (resumeAction === "generate" && depth !== undefined &&
+          tree.progress.targetDepth !== Math.max(depth, tree.progress.baseDepth)) {
           return res.status(400).json({ error: `Tree ${tree.index} checkpoint target depth does not match the original generation depth.` });
         }
         if (tree.complete !== (tree.progress.baseComplete && tree.progress.completedDepth >= tree.progress.targetDepth)) {
@@ -1457,7 +1483,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           } else {
             const completedDepth = tree.statements.length ? Math.max(...tree.statements.map((item: any) => item.depth)) + 1 : 0;
             if (!completedDepth) throw new Error(`Tree ${unit.index} has no completed base tier.`);
-            tree.progress = { baseComplete: true, targetDepth: completedDepth + 1, completedDepth, tiers: {} };
+            tree.progress = { baseComplete: true, baseDepth: completedDepth, targetDepth: completedDepth + 1, completedDepth, tiers: {} };
           }
           ensureTierStates(tree.progress);
           tree.complete = false;
@@ -1476,23 +1502,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const operation = isResume ? resumeAction : action;
           if (!tree) {
             tree = { index: unit.index, title: unit.title, statements: [], sources: [], complete: false,
-              progress: { baseComplete: false, targetDepth: Number.isInteger(depth) ? depth : 2, completedDepth: 0, tiers: {} } as FreshTreeChapterProgress };
+              progress: { baseComplete: false, baseDepth: 0, targetDepth: Number.isInteger(depth) ? depth : 4, completedDepth: 0, tiers: {} } as FreshTreeChapterProgress };
             treeByIndex.set(unit.index, tree);
           }
           const targetDepth = isResume ? tree.progress.targetDepth : operation === "generate" ?
-            (Number.isInteger(depth) ? depth : 2) :
+            (Number.isInteger(depth) ? depth : 4) :
             (tree.progress?.completedDepth ?? (tree.statements.length ? Math.max(...tree.statements.map((item: any) => item.depth)) + 1 : 0)) + 1;
           const tierInstructions = operation === "generate" ? (addedInstructions ?? instructions) : instructions;
           const instructionText = typeof tierInstructions === "string" ? tierInstructions : "";
-          const chapterLabel = mode === "B" || mode === "C" ? ` — chapter ${position + 1} of ${units.length}` : "";
+          const chapterLabel = mode === "E" ? ` — tree ${position + 1} of 3`
+            : mode === "B" || mode === "C" ? ` — chapter ${position + 1} of ${units.length}` : "";
           if (operation === "next" && !isResume) {
             const completedDepth = isValidProgress(tree.progress) ? tree.progress.completedDepth :
               (tree.statements.length ? Math.max(...tree.statements.map((item: any) => item.depth)) + 1 : 0);
             if (!completedDepth) throw new Error("The existing tree has no completed base tier.");
-            tree.progress = { baseComplete: true, targetDepth, completedDepth, tiers: tree.progress?.tiers || {} };
+            tree.progress = { baseComplete: true, baseDepth: tree.progress?.baseDepth || completedDepth,
+              targetDepth, completedDepth, tiers: tree.progress?.tiers || {} };
             tree.complete = false;
           }
-          ensureTierStates(tree.progress);
           const emitTree = () => send({ type: "tree", index: unit.index, title: unit.title, statements: tree.statements,
             sources: tree.sources, progress: tree.progress, complete: tree.complete });
           emitTree();
@@ -1501,21 +1528,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
             continue;
           }
           if (operation === "generate" && !tree.progress.baseComplete) {
-            send({ type: "progress", message: `Building tier 1 of ${targetDepth} — thesis 1 of 1${chapterLabel}` });
+            const exactBase = exactBaseByIndex.get(unit.index);
+            send({ type: "progress", message: exactBase
+              ? `Reusing the existing Tractatus Tree verbatim${chapterLabel}`
+              : `Building the Tractatus Tree base${chapterLabel}` });
             try {
-              tree.statements = await generateFreshTree(unit.source, controller.signal);
+              tree.statements = exactBase || await generateFreshTree(unit.source, provider, controller.signal);
               tree.sources = tree.sources || [];
+              const baseDepth = Math.max(...tree.statements.map((item: any) => item.depth)) + 1;
               tree.progress.baseComplete = true;
-              tree.progress.completedDepth = 2;
-              tree.complete = targetDepth === 2;
+              tree.progress.baseDepth = baseDepth;
+              tree.progress.completedDepth = baseDepth;
+              tree.progress.targetDepth = Math.max(targetDepth, baseDepth);
+              tree.complete = tree.progress.completedDepth >= tree.progress.targetDepth;
               emitTree();
             } catch (error: any) {
-              throw new Error(`Tier 1–2, thesis 1: ${error?.message || "generation failed"}`);
+              throw new Error(`Tractatus Tree base: ${error?.message || "generation failed"}`);
             }
           }
           if (runState.stopRequested) { stopped = true; break; }
-          const startTier = Math.max(3, tree.progress.completedDepth + 1);
-          for (let tierNumber = startTier; tierNumber <= targetDepth; tierNumber++) {
+          const effectiveTargetDepth = tree.progress.targetDepth;
+          ensureTierStates(tree.progress);
+          const startTier = Math.max(tree.progress.baseDepth + 1, tree.progress.completedDepth + 1);
+          for (let tierNumber = startTier; tierNumber <= effectiveTargetDepth; tierNumber++) {
             if (runState.stopRequested) { stopped = true; break; }
             const state = tree.progress.tiers[String(tierNumber)] ||= { completedTheses: [], complete: false };
             const rootTheses = tree.statements.filter((item: any) => item.number.endsWith(".0")).map((item: any) => item.number);
@@ -1538,14 +1573,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 send({ type: "tier", index: unit.index, title: unit.title, statements, sources, progress: tree.progress, complete: tree.complete });
               },
               onProgress: (tier, thesis, totalTheses) => send({ type: "progress",
-                message: `Building tier ${tier} of ${targetDepth} — thesis ${thesis} of ${totalTheses}${chapterLabel}` }),
+                message: `Building tier ${tier} of ${effectiveTargetDepth} — thesis ${thesis} of ${totalTheses}${chapterLabel}` }),
               onWarning: (message) => send({ type: "node-warning", index: unit.index, message }),
             }).then((result) => { wasStopped = result; });
             if (wasStopped || runState.stopRequested) { stopped = true; break; }
           }
           if (stopped) break;
-          tree.complete = tree.progress.baseComplete && tree.progress.completedDepth >= targetDepth;
-          if (!tree.complete) throw new Error(`Checkpoint is at depth ${tree.progress.completedDepth}; target depth ${targetDepth} has not been achieved.`);
+          tree.complete = tree.progress.baseComplete && tree.progress.completedDepth >= effectiveTargetDepth;
+          if (!tree.complete) throw new Error(`Checkpoint is at depth ${tree.progress.completedDepth}; target depth ${effectiveTargetDepth} has not been achieved.`);
           send({ type: "chapter-complete", index: unit.index, title: unit.title, progress: tree.progress, complete: true });
         } catch (error: any) {
           if (!controller.signal.aborted) {

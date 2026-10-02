@@ -1,5 +1,10 @@
 import { callLLM } from "../llm";
 import { generateOutline, Outline, Section as OutlineSection } from "./outlineService";
+import {
+  isCompleteVerbatimQuote,
+  quoteLimitForDepth,
+  STRIKING_QUOTE_CRITERIA,
+} from "./quoteQuality";
 
 export interface ExtractedQuote {
   author: string;
@@ -186,12 +191,7 @@ export async function extractQuotesWithOutline(
 
     if (content.trim().length < 100) continue;
 
-    // Calculate quote target based on density (depth 1=minimal, 10=maximum)
-    const minQuotes = Math.max(3, depth * 2);
-    const maxQuotes = Math.max(10, depth * 8);
-    const densityLabel = depth >= 8 ? "exhaustive - capture every statement" : 
-                        depth >= 5 ? "thorough - capture most important statements" : 
-                        "focused - only the most significant quotes";
+    const maxQuotes = quoteLimitForDepth(depth);
 
     const extractPrompt = `You are an expert quote extractor. Extract meaningful direct quotes from this section.
 
@@ -214,15 +214,16 @@ SECTION TEXT:
 ${content}
 """
 
-EXTRACTION DENSITY: ${densityLabel}
-TARGET: Extract ${minQuotes}-${maxQuotes} quotes from this section.
+${STRIKING_QUOTE_CRITERIA}
+
+MAXIMUM: Select at most ${maxQuotes} exceptional quotes from this section. This is a ceiling, not a target.
 
 EXTRACTION RULES:
-1. Extract meaningful direct quotes - statements, claims, definitions, arguments
+1. Every selection must satisfy the selection standard above
 2. ${author ? `Use "${author}" as the author for all quotes` : 'Set "author" to an empty string for all quotes'}
 3. Use the section title "${section.title}" as the topic
 4. Copy the exact text word-for-word from the source
-5. Minimum 10 words per quote for meaningful content
+5. Do not use ellipses or trim a sentence; each quote must end where the source sentence ends
 
 OUTPUT FORMAT:
 {
@@ -237,10 +238,12 @@ OUTPUT FORMAT:
 
     try {
       const sectionResult = await callLLMWithJSON(provider, extractPrompt);
-      const quotes = sectionResult.quotes || [];
+      const quotes = Array.isArray(sectionResult.quotes)
+        ? sectionResult.quotes.slice(0, maxQuotes)
+        : [];
       
       for (const q of quotes) {
-        if (q.quote && q.quote.trim().length > 20) {
+        if (isCompleteVerbatimQuote(content, q.quote)) {
           allQuotes.push({
             author: author,
             quote: q.quote.trim(),
@@ -319,12 +322,9 @@ export async function extractQuotesChunked(
     
     if (chunkText.trim().length < 50) continue;
 
-    // Calculate quote target based on density
-    const minQuotes = Math.max(3, depth * 2);
-    const maxQuotes = Math.max(10, depth * 8);
-    const densityLabel = depth >= 8 ? "exhaustive" : depth >= 5 ? "thorough" : "focused";
+    const quoteLimit = quoteLimitForDepth(depth);
 
-    const extractPrompt = `Extract meaningful direct quotes from this text. Extraction mode: ${densityLabel}.
+    const extractPrompt = `Select only the strongest direct quotes from this text.
 
 ⚠️ VERBATIM EXTRACTION ONLY - copy exact words, no paraphrasing ⚠️
 
@@ -333,7 +333,11 @@ TEXT:
 ${chunkText}
 """
 
-Extract ${minQuotes}-${maxQuotes} quotes. Output JSON:
+${STRIKING_QUOTE_CRITERIA}
+
+Select at most ${quoteLimit} exceptional quotes. This is a ceiling, not a target. Return an empty array if no passage qualifies.
+
+Output JSON:
 {
   "quotes": [
     {
@@ -346,8 +350,11 @@ Extract ${minQuotes}-${maxQuotes} quotes. Output JSON:
 
     try {
       const result = await callLLMWithJSON(provider, extractPrompt);
-      for (const q of (result.quotes || [])) {
-        if (q.quote && q.quote.trim().length > 20) {
+      const quotes = Array.isArray(result.quotes)
+        ? result.quotes.slice(0, quoteLimit)
+        : [];
+      for (const q of quotes) {
+        if (isCompleteVerbatimQuote(chunkText, q.quote)) {
           allQuotes.push({
             author: author,
             quote: q.quote.trim(),

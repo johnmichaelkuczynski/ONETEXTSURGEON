@@ -1,6 +1,40 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addNextTier, freshTreeParentsAtTier, type FreshTreeStatement } from "./freshTree";
+import {
+  addNextTier,
+  duplicatesFreshNode,
+  freshTreeParentsAtTier,
+  generateFreshTree,
+  type FreshTreeStatement,
+} from "./freshTree";
+
+test("uses the complete Tractatus Tree result unchanged as the Fresh Tree base", async () => {
+  const complete: FreshTreeStatement[] = [
+    { number: "1.0", text: "First thesis", depth: 0 },
+    { number: "1.1", text: "First support", depth: 1 },
+    { number: "1.1.1", text: "First specification", depth: 2 },
+    { number: "1.1.1.1", text: "First detail", depth: 3 },
+  ];
+  let receivedProvider = "";
+  const result = await generateFreshTree(
+    "paper text",
+    "gemini",
+    new AbortController().signal,
+    async (_text, provider) => {
+      receivedProvider = provider;
+      return { columns: [complete.slice(0, 1), complete.slice(0, 2), complete.slice(0, 3), complete], maxDepth: 3, totalStatements: 4 };
+    },
+  );
+
+  assert.equal(receivedProvider, "gemini");
+  assert.deepEqual(result, complete);
+});
+
+test("detects duplicate fresh nodes before they can be appended", () => {
+  const existing = [{ text: "Animals can learn fixed communication patterns after extensive training." }];
+  assert.equal(duplicatesFreshNode("Animals can learn fixed communication patterns after extensive training.", existing), true);
+  assert.equal(duplicatesFreshNode("Children infer productive grammar from sparse linguistic input.", existing), false);
+});
 
 const checkpointedTree: FreshTreeStatement[] = [
   { number: "1.0", text: "First thesis", depth: 0 },

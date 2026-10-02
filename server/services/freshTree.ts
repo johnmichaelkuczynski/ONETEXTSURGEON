@@ -1,5 +1,5 @@
 import { callFreshTreeLLM, freshTreeProviderUnavailable, markFreshTreeProviderUnavailable } from "./freshTreeProvider";
-import type { TractatusStatement } from "./tractatusTree";
+import { generateTractatusTree, type TractatusStatement, type TractatusTreeResult } from "./tractatusTree";
 
 export type FreshTreeStatement = TractatusStatement;
 export type FreshTreeSource = { node: string; marker?: string; url: string };
@@ -75,22 +75,25 @@ export function freshTreeParentsAtTier(existing: FreshTreeStatement[], tierNumbe
   return existing.filter((item) => item.depth === tierNumber - 2);
 }
 
-export async function generateFreshTree(source: string, signal: AbortSignal): Promise<FreshTreeStatement[]> {
+type TractatusTreeGenerator = typeof generateTractatusTree;
+
+export function tractatusBaseStatements(result: TractatusTreeResult): FreshTreeStatement[] {
+  const completeColumn = result.columns.at(-1) || [];
+  return completeColumn.map((statement) => ({ ...statement }));
+}
+
+export async function generateFreshTree(
+  source: string,
+  provider: string,
+  signal: AbortSignal,
+  generator: TractatusTreeGenerator = generateTractatusTree,
+): Promise<FreshTreeStatement[]> {
   assertNotAborted(signal);
-  const required = "Build a compressed two-tier architecture of the author's theory, not an outline. Each n.0 is a load-bearing thesis, not a heading. Each n.1, n.2, ... must ESTABLISH that exact parent using only the source (reason, distinction, definition, author's example, or author's counterexample). Do not emit one root per paragraph. Each thesis needs at least two children. No lines deeper than tier 2. No outside facts.";
-  let previous = "";
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const correction = attempt ? `\nThe previous response was not a valid two-tier tree. Correct the format: each thesis must be numbered 1.0, 2.0, etc., followed by at least one child numbered 1.1, 2.1, etc. No deeper lines. Recheck every line against the source.\n<previous-response>\n${previous}\n</previous-response>` : "";
-    const raw = await callFreshTreeLLM(`Build a plain numbered tree. ${required}\nEvery thesis must have at least one direct sub-claim. Output numbered lines only, with one sentence per line. Do not use Markdown.${correction}\n\n<source>\n${source}\n</source>`, signal);
-    assertNotAborted(signal);
-    const statements = parseTreeLines(raw, 2);
-    const roots = statements.filter((item) => item.number.endsWith(".0"));
-    if (roots.length && roots.every((root) => statements.some((item) => item.number.startsWith(`${root.number.slice(0, -1)}`) && item.number !== root.number))) {
-      return statements;
-    }
-    previous = raw;
-  }
-  throw new Error("The model did not return a valid two-tier tree after a correction attempt.");
+  const result = await generator(source, provider, undefined, signal);
+  assertNotAborted(signal);
+  const statements = tractatusBaseStatements(result);
+  if (!statements.length) throw new Error("Tractatus Tree returned no statements for the Fresh Tree base.");
+  return statements;
 }
 
 function responseText(data: any): string {
@@ -165,11 +168,15 @@ function sameStudy(a: string, b: string): boolean {
   const kb = studyKey(b);
   return Boolean(ka && kb && ka === kb);
 }
-function duplicatesAny(candidate: TierCandidate, lines: Array<{ text: string }>): boolean {
+export function duplicatesFreshNode(text: string, lines: Array<{ text: string }>): boolean {
   return lines.some((line) =>
-    wordOverlap(candidate.text, line.text) > 0.6 ||
-    sameStudy(candidate.text, line.text)
+    wordOverlap(text, line.text) > 0.6 ||
+    sameStudy(text, line.text)
   );
+}
+
+function duplicatesAny(candidate: TierCandidate, lines: Array<{ text: string }>): boolean {
+  return duplicatesFreshNode(candidate.text, lines);
 }
 
 function childCount(instructions: string, tier: number): { min: number; max: number } {
@@ -401,7 +408,12 @@ SOURCE TEXT (freshness exclusion list): ${source}`;
       onWarning(`Node ${candidate.number} dropped: ${label} — ${why}`);
       continue;
     }
-    accepted.push({ ...candidate, text, legitimacyLabel: result!.label });
+    const finalCandidate = { ...candidate, text, legitimacyLabel: result!.label };
+    if (duplicatesAny(finalCandidate, [...existing, ...accepted])) {
+      onWarning(`Node ${candidate.number} dropped: VAGUE — The regenerated node duplicates an existing tree node.`);
+      continue;
+    }
+    accepted.push(finalCandidate);
   }
   return accepted;
 }
